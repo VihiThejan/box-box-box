@@ -96,6 +96,17 @@ def load_model() -> Tuple[List[str], List[float]]:
 MODEL_FEATURES, MODEL_WEIGHTS = load_model()
 
 
+LINEAR_SCALE = 1_000_000.0
+PHYSICS_WEIGHT = 0.0
+
+
+PHYS_TIRE_BASE = {"SOFT": -0.82, "MEDIUM": 0.0, "HARD": 0.94}
+PHYS_TEMP_COEFF = {"SOFT": 0.0018, "MEDIUM": 0.0012, "HARD": 0.0009}
+PHYS_DEG_LIN = {"SOFT": 0.0175, "MEDIUM": 0.0120, "HARD": 0.0082}
+PHYS_DEG_QUAD = {"SOFT": 0.00046, "MEDIUM": 0.00028, "HARD": 0.00016}
+PHYS_KNEE = {"SOFT": 10, "MEDIUM": 13, "HARD": 16}
+
+
 def build_stints(total_laps: int, starting_tire: str, pit_stops: List[dict]) -> List[Tuple[str, int]]:
     pit_map = {int(stop["lap"]): stop["to_tire"] for stop in pit_stops}
     stints: List[Tuple[str, int]] = []
@@ -189,10 +200,36 @@ def build_feature_map(race_config: dict, strategy: dict) -> Dict[str, float]:
 
 def predict_driver_score(race_config: dict, strategy: dict) -> float:
     feats = build_feature_map(race_config, strategy)
-    score = 0.0
+    linear = 0.0
     for name, w in zip(MODEL_FEATURES, MODEL_WEIGHTS):
-        score += w * feats.get(name, 0.0)
-    return score
+        linear += w * feats.get(name, 0.0)
+
+    if PHYSICS_WEIGHT == 0.0:
+        return linear / LINEAR_SCALE
+
+    total_laps = int(race_config["total_laps"])
+    base_lap = float(race_config["base_lap_time"])
+    track_temp = float(race_config["track_temp"])
+    pit_lane_time = float(race_config["pit_lane_time"])
+    pit_map = {int(stop["lap"]): stop["to_tire"] for stop in strategy.get("pit_stops", [])}
+    tire = strategy["starting_tire"]
+    age = 0
+    physics = 0.0
+    temp_delta = track_temp - 30.0
+
+    for lap in range(1, total_laps + 1):
+        age += 1
+        d = PHYS_DEG_LIN[tire] * age
+        if age > PHYS_KNEE[tire]:
+            x = age - PHYS_KNEE[tire]
+            d += PHYS_DEG_QUAD[tire] * x * x
+        physics += base_lap + PHYS_TIRE_BASE[tire] + PHYS_TEMP_COEFF[tire] * temp_delta * age + d
+        if lap in pit_map:
+            physics += pit_lane_time
+            tire = pit_map[lap]
+            age = 0
+
+    return linear / LINEAR_SCALE + PHYSICS_WEIGHT * physics
 
 
 def simulate_race(race_input: dict) -> List[str]:
